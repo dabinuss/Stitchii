@@ -767,6 +767,16 @@ size_t BackgroundPipelineLimit() {
     return limit;
 }
 
+// A/B switch for the non-blocking pipeline usage history checkpoint.
+// STITCHII_ASYNC_USAGE_SAVE=0 restores the original synchronous write on the GPU thread.
+bool AsyncUsageSaveEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("STITCHII_ASYNC_USAGE_SAVE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 // EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
 bool PreloadAllPipelines() {
     static const bool all = [] {
@@ -1196,6 +1206,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-stitchii", CACHE_VERSION);
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
+    LOG_INFO(Render_Vulkan,
+             "Stitchii cache controls: async_usage_save={}, prebuild={}, prebuild_threads={}, "
+             "prebuild_limit={}",
+             AsyncUsageSaveEnabled(), BackgroundPipelinesEnabled(),
+             BackgroundPipelineThreads(), BackgroundPipelineLimit());
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
     size_t deferred_dropped = 0;
@@ -1504,7 +1519,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
                                    : std::chrono::steady_clock::duration{std::chrono::seconds{30}};
     if (used_this_session.insert(pipeline.get()).second &&
         std::chrono::steady_clock::now() - used_pipelines_saved > save_interval) {
-        SaveUsedPipelines(true);
+        SaveUsedPipelines(AsyncUsageSaveEnabled());
     }
     if (current_pipeline) {
         current_pipeline->AddTransition(pipeline.get());
