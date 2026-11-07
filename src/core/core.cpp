@@ -334,6 +334,12 @@ struct System::Impl {
     void InitializeKernel(System& system) {
         LOG_DEBUG(Core, "initialized OK");
 
+        // A previous Switch 2 shutdown releases the guest RAM backing section. Recreate it
+        // before the reinitialization check so the next boot does not keep stale guest pages.
+        if (!device_memory.has_value()) {
+            device_memory.emplace();
+        }
+
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
         kernel.Initialize();
@@ -538,6 +544,12 @@ struct System::Impl {
 
         // Reset all glue registrations
         arp_manager.ResetAll();
+
+        // Release the guest RAM section between Switch 2 sessions. Keeping touched pages
+        // reserved after shutdown can unnecessarily raise memory commitment on the next boot.
+        if (Settings::CurrentProgramIsSwitch2()) {
+            device_memory.reset();
+        }
 
         LOG_DEBUG(Core, "Shutdown OK");
     }

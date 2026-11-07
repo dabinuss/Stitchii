@@ -250,7 +250,7 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
                 shader_cache_folder_path, "opengl", VideoCommon::OpenGLPipelineCacheVersion);
         case GameListRemoveTarget::VkShaderCache:
             return VideoCommon::VersionedPipelineCachePath(
-                shader_cache_folder_path, "vulkan", VideoCommon::VulkanPipelineCacheVersion);
+                shader_cache_folder_path, "vulkan-stitchii", VideoCommon::VulkanPipelineCacheVersion);
         default:
             return std::filesystem::path{};
         }
@@ -261,7 +261,17 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
                                     tr("A shader cache for this title does not exist."));
         return;
     }
-    if (Common::FS::RemoveFile(target_file)) {
+    const bool removed_cache = Common::FS::RemoveFile(target_file);
+    bool removed_usage = true;
+    if (removed_cache && target == GameListRemoveTarget::VkShaderCache) {
+        const auto used_file = VideoCommon::VersionedPipelineCachePath(
+            shader_cache_folder_path, "vulkan_used-stitchii",
+            VideoCommon::VulkanPipelineCacheVersion);
+        if (Common::FS::Exists(used_file)) {
+            removed_usage = Common::FS::RemoveFile(used_file);
+        }
+    }
+    if (removed_cache && removed_usage) {
         QtCommon::Frontend::Information(tr("Successfully Removed"),
                                         tr("Successfully removed the transferable shader cache."));
     } else {
@@ -274,7 +284,7 @@ void RemoveVulkanDriverPipelineCache(u64 program_id) {
     const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
     const auto shader_cache_folder_path = shader_cache_dir / fmt::format("{:016x}", program_id);
     const auto target_file = VideoCommon::VersionedPipelineCachePath(
-        shader_cache_folder_path, "vulkan_pipelines", VideoCommon::VulkanPipelineCacheVersion);
+        shader_cache_folder_path, "vulkan_pipelines-stitchii", VideoCommon::VulkanPipelineCacheVersion);
 
     if (!Common::FS::Exists(target_file)) {
         return;

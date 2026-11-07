@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -263,14 +264,34 @@ struct FileBackend final : public Backend {
         auto message = FormatLogMessage(entry);
 #ifndef __ANDROID__
         if (Settings::values.censor_username.GetValue()) {
+#ifdef _WIN32
+            // USERNAME may differ from the profile directory and LOGNAME can be set by
+            // Unix-like shells. Redact the actual Windows profile path in both spellings.
+            static const std::string profile_path = [] {
+                if (const char* path = std::getenv("USERPROFILE")) {
+                    return std::string{path};
+                }
+                return std::string{};
+            }();
+            if (!profile_path.empty()) {
+                boost::replace_all(message, profile_path, "%USERPROFILE%");
+                std::string forward_path = profile_path;
+                std::replace(forward_path.begin(), forward_path.end(), '\\', '/');
+                boost::replace_all(message, forward_path, "%USERPROFILE%");
+            }
+#endif
             // This must be a static otherwise it would get checked on EVERY
             // instance of logging an entry...
             static std::string username = []() -> std::string {
                 // in order of precedence
                 // LOGNAME usually works on UNIX, USERNAME on Windows
                 // Some UNIX systems suck and don't use LOGNAME so we also need USER :(
-                for (auto const var : { "LOGNAME", "USERNAME", "USER", })
-                    if (auto const s = ::getenv(var); s != nullptr)
+#ifdef _WIN32
+                for (auto const var : { "USERNAME", "USER", "LOGNAME" })
+#else
+                for (auto const var : { "LOGNAME", "USER", "USERNAME" })
+#endif
+                    if (auto const s = ::getenv(var); s != nullptr && s[0] != '\0')
                         return std::string{s};
                 return std::string{};
             }();

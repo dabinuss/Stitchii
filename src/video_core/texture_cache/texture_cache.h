@@ -257,10 +257,20 @@ void TextureCache<P>::RunGarbageCollector() {
 
 template <class P>
 void TextureCache<P>::ApplyThresholdOverrides(bool log) {
-    // On every GPU: past what a frame needs, more device memory only keeps the textures of earlier
-    // scenes (title 1 filled 6.7 GB of an 8 GB card and draws its races in ~5 GB), so collect from
-    // MaxCriticalMemory on rather than near the card's budget.
-    critical_memory = (std::min)(critical_memory, MaxCriticalMemory);
+    // The fixed 5 GiB cap hurts Switch 2 games on larger GPUs: the cache repeatedly
+    // evicts and re-decodes textures with gigabytes of VRAM still free (Eglantine #498).
+    // Keep the original cap for smaller budgets; otherwise allow at most 75% of the
+    // driver's *current* budget, with existing pressure/slack margins below it.
+    u64 critical_cap = MaxCriticalMemory;
+    if (native_thresholds_applied) {
+        if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
+            const u64 budget = runtime.GetDeviceMemoryBudget();
+            if (budget > 8_GiB) {
+                critical_cap = (std::max)(critical_cap, (budget / 4) * 3);
+            }
+        }
+    }
+    critical_memory = (std::min)(critical_memory, critical_cap);
     expected_memory =
         (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
     minimum_memory =

@@ -393,6 +393,16 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
+    if (index > tic_limit && std::getenv("EDEN_NX2_RENDER_TRACE")) {
+        static std::atomic<u32> invalid_indices{};
+        if (invalid_indices.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_WARNING(HW_GPU,
+                        "Invalid shader TIC index: program={:#x} stage={} handle={:#x} "
+                        "index={} limit={} base={:#x} native_tiling={}",
+                        program_base, static_cast<u32>(stage), raw, index, tic_limit,
+                        tic_addr, gpu_memory->UsesNativeTiling());
+        }
+    }
     ASSERT(index <= tic_limit);
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
@@ -1169,7 +1179,8 @@ u64 FileEnvironment::ReadInstruction(u32 address) {
 u32 FileEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
     const auto it{cbuf_values.find(MakeCbufKey(cbuf_index, cbuf_offset))};
     if (it == cbuf_values.end()) {
-        throw Shader::LogicError("Uncached read texture type");
+        throw Shader::LogicError("Uncached constant buffer value: bank={}, offset={:#x}",
+                                 cbuf_index, cbuf_offset);
     }
     return it->second;
 }
@@ -1177,7 +1188,7 @@ u32 FileEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
 Shader::TextureType FileEnvironment::ReadTextureType(u32 handle) {
     const auto it{texture_types.find(handle)};
     if (it == texture_types.end()) {
-        throw Shader::LogicError("Uncached read texture type");
+        throw Shader::LogicError("Uncached texture type: handle={:#x}", handle);
     }
     return it->second;
 }
@@ -1185,7 +1196,7 @@ Shader::TextureType FileEnvironment::ReadTextureType(u32 handle) {
 Shader::TexturePixelFormat FileEnvironment::ReadTexturePixelFormat(u32 handle) {
     const auto it{texture_pixel_formats.find(handle)};
     if (it == texture_pixel_formats.end()) {
-        throw Shader::LogicError("Uncached read texture pixel format");
+        throw Shader::LogicError("Uncached texture pixel format: handle={:#x}", handle);
     }
     return it->second;
 }

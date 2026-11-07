@@ -734,7 +734,7 @@ constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 
 // EDEN_NX2_BACKGROUND_PIPELINES=0: cached pipelines boot skips are built when first needed, on
 // the GPU thread, as before. EDEN_NX2_BACKGROUND_PIPELINE_THREADS sets how many threads build
-// them (default a quarter of the host's, 1 to 6).
+// them (default 1-2 to avoid competing with the emulated GPU thread).
 bool BackgroundPipelinesEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_BACKGROUND_PIPELINES");
@@ -747,7 +747,24 @@ size_t BackgroundPipelineThreads() {
     if (const char* value = std::getenv("EDEN_NX2_BACKGROUND_PIPELINE_THREADS")) {
         return std::clamp<size_t>(static_cast<size_t>(std::strtoull(value, nullptr, 10)), 1, 16);
     }
-    return std::clamp<size_t>(std::thread::hardware_concurrency() / 4, 1, 6);
+    // Vulkan driver compilation also consumes CPU time and can contend with foreground draws.
+    // A smaller default leaves cores available for the emulator; advanced users can override it.
+    return std::clamp<size_t>(std::thread::hardware_concurrency() / 8, 1, 2);
+}
+
+// Limit prebuild work to recent entries. A cache containing tens of thousands of historical
+// pipelines otherwise keeps CPU cores and the Vulkan driver busy for the entire play session.
+// The disk cache still holds all entries; omitted ones are compiled when actually needed.
+// Set EDEN_NX2_BACKGROUND_PIPELINE_LIMIT to override; 0 disables background prebuilding.
+size_t BackgroundPipelineLimit() {
+    static const size_t limit = [] {
+        if (const char* value = std::getenv("EDEN_NX2_BACKGROUND_PIPELINE_LIMIT")) {
+            return std::clamp<size_t>(static_cast<size_t>(std::strtoull(value, nullptr, 10)),
+                                      0, 32768);
+        }
+        return size_t{2048};
+    }();
+    return limit;
 }
 
 // EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
@@ -774,7 +791,7 @@ PipelineCache::~PipelineCache() {
     evicted_pipelines.clear();
 }
 
-void PipelineCache::SaveUsedPipelines() {
+void PipelineCache::SaveUsedPipelines(bool asynchronous) {
     used_pipelines_saved = std::chrono::steady_clock::now();
     // A session too short to say what the game uses (a boot to the menu) keeps the old list.
     constexpr size_t MinimumUsed = 64;
@@ -797,13 +814,34 @@ void PipelineCache::SaveUsedPipelines() {
             next.try_emplace(hash, static_cast<u8>(age + 1));
         }
     }
-    std::ofstream file{used_pipelines_filename, std::ios::binary | std::ios::trunc};
-    const u32 count = static_cast<u32>(next.size());
-    file.write(reinterpret_cast<const char*>(&UsedPipelinesMagic), sizeof(UsedPipelinesMagic));
-    file.write(reinterpret_cast<const char*>(&count), sizeof(count));
-    for (const auto& [hash, age] : next) {
-        file.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
-        file.write(reinterpret_cast<const char*>(&age), sizeof(age));
+    // Build the snapshot on the GPU thread, but never perform blocking disk I/O there.
+    // The filename and snapshot are captured by value so switching titles cannot redirect
+    // a pending write. The serialization worker also handles shader-cache writes.
+    const auto filename = used_pipelines_filename;
+    auto write = [filename, snapshot = std::move(next)] {
+        std::ofstream file{filename, std::ios::binary | std::ios::trunc};
+        if (!file) {
+            LOG_ERROR(Common_Filesystem, "Failed to open pipeline usage cache {}",
+                      Common::FS::PathToUTF8String(filename));
+            return;
+        }
+        const u32 count = static_cast<u32>(snapshot.size());
+        file.write(reinterpret_cast<const char*>(&UsedPipelinesMagic), sizeof(UsedPipelinesMagic));
+        file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (const auto& [hash, age] : snapshot) {
+            file.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+            file.write(reinterpret_cast<const char*>(&age), sizeof(age));
+        }
+        if (!file) {
+            LOG_ERROR(Common_Filesystem, "Failed to save pipeline usage cache {}",
+                      Common::FS::PathToUTF8String(filename));
+        }
+    };
+    if (asynchronous) {
+        serialization_thread.QueueWork(std::move(write));
+    } else {
+        // Destructor path: all queued writes are already drained.
+        write();
     }
 }
 
@@ -1148,57 +1186,25 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
     }
-    // This fork's files: its records carry task/mesh state other builds of the same cache version
-    // cannot read, and their loader deletes a file it fails to read. The shared files of earlier
-    // builds are copied once.
+    // Stitchii must not relabel or reuse caches created by Lichii or Fritchii.
+    // Cross-fork cache records can lack texture descriptors required by our recompiler,
+    // causing failed shader preloads and unnecessary runtime recompilation.
+    // Keep separate files for this fork; previous caches and save data remain untouched.
     pipeline_cache_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-frizti", CACHE_VERSION);
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-stitchii", CACHE_VERSION);
     used_pipelines_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-frizti", CACHE_VERSION);
-    for (const auto& [shared, own] :
-         {std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION),
-                    pipeline_cache_filename},
-          std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION),
-                    used_pipelines_filename}}) {
-        std::error_code error;
-        if (!std::filesystem::exists(own, error) && std::filesystem::exists(shared, error)) {
-            std::filesystem::copy_file(shared, own, error);
-            LOG_INFO(Render_Vulkan, "Copied pipeline cache {} to {}{}",
-                     Common::FS::PathToUTF8String(shared), Common::FS::PathToUTF8String(own),
-                     error ? fmt::format(" (failed: {})", error.message()) : std::string{});
-        }
-    }
-    // zortos293/Lichii builds from #194 on (cache version 53) write the same records as this
-    // build under another version number: with no cache of this version, copy theirs and
-    // relabel the copy. Their files stay as they are.
-    if (std::error_code error; !std::filesystem::exists(pipeline_cache_filename, error)) {
-        constexpr u32 ZortosCacheVersion = 53;
-        constexpr std::array<char, 8> PipelineCacheMagic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
-        const auto zortos = VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan",
-                                                                    ZortosCacheVersion);
-        if (VideoCommon::CopyCompatiblePipelineCache(zortos, pipeline_cache_filename,
-                                                     PipelineCacheMagic, ZortosCacheVersion,
-                                                     CACHE_VERSION)) {
-            LOG_INFO(Render_Vulkan, "Copied cache version {} pipeline cache {} to {}",
-                     ZortosCacheVersion, Common::FS::PathToUTF8String(zortos),
-                     Common::FS::PathToUTF8String(pipeline_cache_filename));
-            const auto zortos_used = VideoCommon::VersionedPipelineCachePath(
-                base_dir, "vulkan_used", ZortosCacheVersion);
-            if (!std::filesystem::exists(used_pipelines_filename, error) &&
-                std::filesystem::exists(zortos_used, error)) {
-                std::filesystem::copy_file(zortos_used, used_pipelines_filename, error);
-            }
-        }
-    }
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-stitchii", CACHE_VERSION);
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
-    std::vector<std::pair<GraphicsPipelineCacheKey, std::vector<FileEnvironment>>> deferred_graphics;
+    size_t deferred_dropped = 0;
+    // deque permits O(1) removal of the oldest candidates while reading the disk cache.
+    std::deque<std::pair<GraphicsPipelineCacheKey, std::vector<FileEnvironment>>> deferred_graphics;
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
-            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", CACHE_VERSION);
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines-stitchii", CACHE_VERSION);
         vulkan_pipeline_cache =
             LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
     }
@@ -1280,7 +1286,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
                                     : !used_pipelines.contains(hash))) {
             ++skipped_pipelines;
-            if (BackgroundPipelinesEnabled()) {
+            if (BackgroundPipelinesEnabled() && BackgroundPipelineLimit() != 0) {
+                // The cache file appends entries, so retain the newest candidates while
+                // bounding both compilation pressure and the amount of captured shader data.
+                if (deferred_graphics.size() >= BackgroundPipelineLimit()) {
+                    deferred_graphics.pop_front();
+                    ++deferred_dropped;
+                }
                 deferred_graphics.emplace_back(key, std::move(envs));
             }
             return;
@@ -1313,8 +1325,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
     if (skipped_pipelines != 0) {
         LOG_INFO(Render_Vulkan,
-                 "{} cached graphics pipelines are built when first needed",
-                 skipped_pipelines);
+                 "{} cached graphics pipelines skipped at boot; {} queued for background "
+                 "prebuild ({} older candidates omitted by limit {})",
+                 skipped_pipelines, deferred_graphics.size(), deferred_dropped,
+                 BackgroundPipelineLimit());
     }
 
     std::unique_lock lock{state.mutex};
@@ -1487,10 +1501,10 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     }
     const auto save_interval = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PipelineRetention)
                                    ? std::chrono::steady_clock::duration{std::chrono::seconds{15}}
-                                   : std::chrono::steady_clock::duration{std::chrono::minutes{2}};
+                                   : std::chrono::steady_clock::duration{std::chrono::seconds{30}};
     if (used_this_session.insert(pipeline.get()).second &&
         std::chrono::steady_clock::now() - used_pipelines_saved > save_interval) {
-        SaveUsedPipelines();
+        SaveUsedPipelines(true);
     }
     if (current_pipeline) {
         current_pipeline->AddTransition(pipeline.get());
@@ -1839,7 +1853,17 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         env.Dump(hash, key.unique_hashes[index]);
     }
-    LOG_ERROR(Render_Vulkan, "{}", exception.what());
+    // Identify the shader stages for prebuild/runtime failures without extra work on success.
+    std::string shader_ids;
+    for (size_t stage = 0; stage < key.unique_hashes.size(); ++stage) {
+        if (key.unique_hashes[stage] != 0) {
+            shader_ids += fmt::format(" s{}:{:016x}", stage, key.unique_hashes[stage]);
+        }
+    }
+    LOG_ERROR(Render_Vulkan,
+              "Graphics pipeline compilation failed pipeline={:016x} origin={} shaders:{}: {}",
+              key.Hash(), build_in_parallel ? "runtime" : "cached/prebuild", shader_ids,
+              exception.what());
     return nullptr;
 }
 
@@ -1848,8 +1872,9 @@ namespace {
 // emits it; the driver compile is on workers): the first 400 over 2 ms and every one over 100 ms
 // are logged, and the totals every 10 s, to tell how much of the stutter on new content is
 // translation.
+template <typename DescribePipeline>
 void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_point begin,
-                           const std::string& shaders) {
+                           DescribePipeline&& describe_pipeline) {
     static std::chrono::steady_clock::duration total{};
     static u32 count{}, logged{};
     static auto window = std::chrono::steady_clock::now();
@@ -1863,8 +1888,10 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
     if (elapsed > std::chrono::milliseconds{100} ||
         (elapsed > std::chrono::milliseconds{2} && logged < 400)) {
         ++logged;
+        // Formatting shader identifiers on every runtime pipeline build is wasted work:
+        // only construct the description for a pipeline we actually log.
         LOG_INFO(Render_Vulkan, "{} pipeline built on the GPU thread in {:.1f} ms: {}", kind,
-                 ms(elapsed), shaders);
+                 ms(elapsed), describe_pipeline());
     }
     if (now - window > std::chrono::seconds{10}) {
         const auto take = [](auto& counter) {
@@ -1886,13 +1913,15 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     const auto begin = std::chrono::steady_clock::now();
     SCOPE_EXIT {
-        std::string shaders = fmt::format("pipeline={:016x}", graphics_key.Hash());
-        for (size_t stage = 0; stage < graphics_key.unique_hashes.size(); ++stage) {
-            if (graphics_key.unique_hashes[stage] != 0) {
-                shaders += fmt::format(" s{}:{:016x}", stage, graphics_key.unique_hashes[stage]);
+        ReportRuntimePipeline("Graphics", begin, [&] {
+            std::string shaders = fmt::format("pipeline={:016x}", graphics_key.Hash());
+            for (size_t stage = 0; stage < graphics_key.unique_hashes.size(); ++stage) {
+                if (graphics_key.unique_hashes[stage] != 0) {
+                    shaders += fmt::format(" s{}:{:016x}", stage, graphics_key.unique_hashes[stage]);
+                }
             }
-        }
-        ReportRuntimePipeline("Graphics", begin, shaders);
+            return shaders;
+        });
     };
     GraphicsEnvironments environments;
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
@@ -1945,11 +1974,12 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     const ComputePipelineCacheKey& key, const ShaderInfo* shader) {
     const auto begin = std::chrono::steady_clock::now();
     SCOPE_EXIT {
-        ReportRuntimePipeline("Compute", begin,
-                              fmt::format("pipeline={:016x} s6:{:016x} address={:#x}", key.Hash(),
-                                          key.unique_hash,
-                                          kepler_compute->regs.code_loc.Address() +
-                                              kepler_compute->launch_description.program_start));
+        ReportRuntimePipeline("Compute", begin, [&] {
+            return fmt::format("pipeline={:016x} s6:{:016x} address={:#x}", key.Hash(),
+                               key.unique_hash,
+                               kepler_compute->regs.code_loc.Address() +
+                                   kepler_compute->launch_description.program_start);
+        });
     };
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
