@@ -261,8 +261,14 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     // evicts and re-decodes textures with gigabytes of VRAM still free (Eglantine #498).
     // Keep the original cap for smaller budgets; otherwise allow at most 75% of the
     // driver's *current* budget, with existing pressure/slack margins below it.
+    // A/B control: STITCHII_ADAPTIVE_TEXTURE_CACHE=0 restores the original 5 GiB cap.
+    // Read once: changing a setting during a live render would invalidate benchmark results.
+    static const bool adaptive_texture_cap = [] {
+        const char* value = std::getenv("STITCHII_ADAPTIVE_TEXTURE_CACHE");
+        return value == nullptr || value[0] != '0';
+    }();
     u64 critical_cap = MaxCriticalMemory;
-    if (native_thresholds_applied) {
+    if (adaptive_texture_cap && native_thresholds_applied) {
         if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
             const u64 budget = runtime.GetDeviceMemoryBudget();
             if (budget > 8_GiB) {
@@ -283,6 +289,10 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
         }
     }
     if (log) {
+        LOG_INFO(HW_GPU,
+                 "Stitchii texture cache: policy={} cap={} MiB, expected={} MiB, critical={} MiB",
+                 adaptive_texture_cap ? "adaptive" : "legacy-5GiB", critical_cap >> 20,
+                 expected_memory >> 20, critical_memory >> 20);
         LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
                  expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
     }
