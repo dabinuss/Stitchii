@@ -81,6 +81,8 @@ jobs:
           }
           windeployqt --release --no-translations build/release/bin/lichii.exe
           if ($LASTEXITCODE -ne 0) { throw "Qt deployment failed" }
+          # Branding is restricted to the test package; do not touch source or build targets.
+          Rename-Item build/release/bin/lichii.exe Stitchii.exe
           Copy-Item tools/stitchii-analyze-log.ps1 build/release/bin/stitchii-analyze-log.ps1
 
       - name: Upload private development artifact (no GitHub release)
