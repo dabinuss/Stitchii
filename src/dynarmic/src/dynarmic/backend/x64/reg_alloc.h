@@ -70,7 +70,7 @@ public:
         return current_references == 0 && is_being_used_count == 0 && !is_scratch && !is_set_last_use &&
                (total_uses != accumulated_uses || (values.empty() && total_uses == 0 && max_bit_width == 0));
     }
-    constexpr size_t GetMaxBitWidth() const noexcept { return 1 << max_bit_width; }
+    constexpr size_t GetMaxBitWidth() const noexcept { return size_t{1} << max_bit_width; }
     void AddValue(HostLoc loc, IR::Inst* inst) noexcept;
     /// Checks if the given instruction is in our values set
     /// SAFETY: Const is casted away, irrelevant since this is only used for checking
