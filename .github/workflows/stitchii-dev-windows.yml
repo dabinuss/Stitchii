@@ -1,0 +1,103 @@
+name: Stitchii Windows development build (no release)
+
+# This workflow is intentionally NOT triggered by changes to stitchii/stutterfix.
+# After explicit owner approval, create the stitchii/ci-test branch from the reviewed
+# stutterfix commit. Its first push runs this isolated compile and uploads a test artifact.
+on:
+  push:
+    branches:
+      - stitchii/ci-test
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stitchii-windows-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Windows MSVC source-build check
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Verify Vulkan tools
+        shell: pwsh
+        run: glslangValidator --version
+
+      - name: Configure Stitchii
+        shell: pwsh
+        run: |
+          cmake -S . -B build/release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTING=OFF `
+            -DYUZU_TESTS=OFF `
+            -DYUZU_CMD=ON `
+            -DYUZU_ROOM=OFF `
+            -DYUZU_ROOM_STANDALONE=OFF `
+            -DYUZU_USE_BUNDLED_QT=OFF `
+            -DYUZU_USE_BUNDLED_SDL3=ON `
+            -DENABLE_UPDATE_CHECKER=OFF `
+            -DLICHII_BUILD_TAG=stitchii-dev-${{ github.run_number }} `
+            -DLICHII_BUILD_PLATFORM=windows-x86_64 `
+            -DUSE_DISCORD_PRESENCE=OFF
+          if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
+
+      - name: Compile Windows emulator and CLI
+        shell: pwsh
+        run: |
+          cmake --build build/release --target yuzu yuzu-cmd --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "Windows compilation failed" }
+
+      - name: Package runtime dependencies
+        shell: pwsh
+        run: |
+          foreach ($exe in @('lichii.exe', 'eden-cli.exe')) {
+            if (-not (Test-Path "build/release/bin/$exe")) {
+              throw "Missing expected executable: $exe"
+            }
+          }
+          windeployqt --release --no-translations build/release/bin/lichii.exe
+          if ($LASTEXITCODE -ne 0) { throw "Qt deployment failed" }
+          Copy-Item tools/stitchii-analyze-log.ps1 build/release/bin/stitchii-analyze-log.ps1
+
+      - name: Upload private development artifact (no GitHub release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stitchii-dev-windows-x64-${{ github.sha }}
+          path: build/release/bin/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload CMake diagnostic files on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stitchii-windows-build-diagnostics-${{ github.sha }}
+          path: |
+            build/release/CMakeCache.txt
+            build/release/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7
