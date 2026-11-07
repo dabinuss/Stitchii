@@ -20,6 +20,10 @@ jobs:
     name: Windows MSVC source-build check
     runs-on: windows-2022
     timeout-minutes: 120
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/cpm
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -47,6 +51,30 @@ jobs:
         shell: pwsh
         run: glslangValidator --version
 
+      - name: Restore compilation and dependency caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .sccache
+            .cache/cpm
+          key: stitchii-msvc2022-${{ runner.os }}-${{ hashFiles('cpmfile.json', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            stitchii-msvc2022-${{ runner.os }}-${{ hashFiles('cpmfile.json', 'CMakeLists.txt') }}-
+            stitchii-msvc2022-${{ runner.os }}-
+
+      - name: Install sccache compiler cache
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'sccache.zip'
+          $folder = Join-Path $env:RUNNER_TEMP 'stitchii-sccache'
+          Invoke-WebRequest -OutFile $archive 'https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip'
+          Expand-Archive -Path $archive -DestinationPath $folder
+          $exe = Get-ChildItem -LiteralPath $folder -Recurse -Filter sccache.exe | Select-Object -First 1
+          if (-not $exe) { throw 'sccache executable missing from downloaded archive' }
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $exe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw 'sccache setup failed' }
+
       - name: Configure Stitchii
         shell: pwsh
         run: |
@@ -60,16 +88,26 @@ jobs:
             -DYUZU_USE_BUNDLED_QT=OFF `
             -DYUZU_USE_BUNDLED_SDL3=ON `
             -DENABLE_UPDATE_CHECKER=OFF `
-            -DLICHII_BUILD_TAG=stitchii-dev-${{ github.run_number }} `
+            -DLICHII_BUILD_TAG=stitchii-dev `
             -DLICHII_BUILD_PLATFORM=windows-x86_64 `
-            -DUSE_DISCORD_PRESENCE=OFF
+            -DUSE_DISCORD_PRESENCE=OFF `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
 
       - name: Compile Windows emulator and CLI
         shell: pwsh
         run: |
+          sccache --zero-stats
           cmake --build build/release --target yuzu yuzu-cmd --parallel 4
           if ($LASTEXITCODE -ne 0) { throw "Windows compilation failed" }
+
+      - name: Report compiler cache hit rate
+        if: always()
+        shell: pwsh
+        run: |
+          sccache --show-stats
+          # Compiler statistics are diagnostic only; a cache miss is not a build failure.
 
       - name: Package runtime dependencies
         shell: pwsh
