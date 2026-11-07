@@ -103,7 +103,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows compilation failed" }
 
       - name: Report compiler cache hit rate
-        if: always()
+        if: success()
         shell: pwsh
         run: |
           sccache --show-stats
