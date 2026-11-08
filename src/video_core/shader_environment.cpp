@@ -415,9 +415,9 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
 
     auto entry = read_descriptor(index);
     u32 resolved_index = index;
-    if (native && (!entry || entry->format.Value() == Tegra::Texture::TextureFormat{}) &&
-        handle.first % sizeof(Tegra::Texture::TICEntry) == 0) {
-        const u32 offset_index = handle.first / sizeof(Tegra::Texture::TICEntry);
+    if (native && (!entry || entry->format.Value() == Tegra::Texture::TextureFormat{})) {
+        const u32 offset_index =
+            Tegra::Texture::AlternateTextureHeaderIndex(handle.first, index, tic_limit, native);
         if (offset_index != index) {
             auto alternate = read_descriptor(offset_index);
             if (alternate && alternate->format.Value() != Tegra::Texture::TextureFormat{}) {
