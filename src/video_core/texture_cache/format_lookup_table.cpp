@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "video_core/texture_cache/format_lookup_table.h"
@@ -44,6 +46,19 @@ constexpr u32 Hash(TextureFormat format, ComponentType component, bool is_srgb =
 PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, ComponentType green,
                                        ComponentType blue, ComponentType alpha,
                                        bool is_srgb) noexcept {
+    // Zero is not a defined TIC format (usually an unbound/invalid descriptor). The shader
+    // environment guards these, but texture-cache callers can still encounter them. Avoid
+    // a critical assertion storm and use the existing neutral format with a bounded warning.
+    if (format == TextureFormat{}) {
+        static std::atomic<u32> invalid_formats{};
+        if (invalid_formats.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU,
+                        "Zero TIC format: srgb={} components={{{} {} {} {}}}; using RGBA8",
+                        is_srgb, static_cast<int>(red), static_cast<int>(green),
+                        static_cast<int>(blue), static_cast<int>(alpha));
+        }
+        return PixelFormat::A8B8G8R8_UNORM;
+    }
     switch (Hash(format, red, green, blue, alpha, is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
         return PixelFormat::A8B8G8R8_UNORM;
