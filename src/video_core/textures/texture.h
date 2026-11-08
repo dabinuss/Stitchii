@@ -298,6 +298,17 @@ struct TICEntry {
 };
 static_assert(sizeof(TICEntry) == 0x20, "TICEntry has wrong size");
 
+/// Try interpreting a native TIC handle as a byte offset only after the direct descriptor
+/// has been determined invalid. A valid direct index always takes precedence.
+[[nodiscard]] constexpr u32 AlternateTextureHeaderIndex(u32 raw_index, u32 resolved_index,
+                                                         u32 limit, bool native) {
+    constexpr u32 EntryBytes = sizeof(TICEntry);
+    if (native && raw_index % EntryBytes == 0 && raw_index / EntryBytes <= limit) {
+        return raw_index / EntryBytes;
+    }
+    return resolved_index;
+}
+
 enum class WrapMode : u32 {
     Wrap = 0,
     Mirror = 1,
