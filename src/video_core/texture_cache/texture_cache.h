@@ -892,13 +892,37 @@ typename P::Framebuffer* TextureCache<P>::GetFramebuffer() {
 template <class P>
 ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
     auto& table = compute ? channel_state->compute_image_table : channel_state->graphics_image_table;
-    index = Tegra::Texture::TextureHeaderIndex(index, table.current_limit,
-                                               gpu_memory->UsesNativeTiling());
+    const u32 raw_index = index;
+    const bool native = gpu_memory->UsesNativeTiling();
+    index = Tegra::Texture::TextureHeaderIndex(index, table.current_limit, native);
     if (index > table.current_limit) {
         LOG_TRACE(HW_GPU, "Invalid image view index={}", index);
         return NULL_IMAGE_VIEW_ID;
     }
-    auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
+    auto [descriptor, is_new] = table.Read(*gpu_memory, index);
+    // Match shader-side TIC decoding: a native bindless handle can be a byte offset even
+    // when its numeric value still lies inside the header pool. Only substitute the alternate
+    // descriptor if the direct descriptor is invalid; never override a valid native index.
+    if (native && raw_index % sizeof(TICEntry) == 0 &&
+        (descriptor.format.Value() == Tegra::Texture::TextureFormat{} ||
+         !IsValidEntry(*gpu_memory, descriptor))) {
+        const u32 offset_index = raw_index / sizeof(TICEntry);
+        if (offset_index != index && offset_index <= table.current_limit) {
+            auto [alternate, alternate_is_new] = table.Read(*gpu_memory, offset_index);
+            if (alternate.format.Value() != Tegra::Texture::TextureFormat{} &&
+                IsValidEntry(*gpu_memory, alternate)) {
+                static u32 fixed_offset_handles{};
+                if (fixed_offset_handles++ < 16) {
+                    LOG_INFO(HW_GPU,
+                             "Recovered native TIC byte-offset handle {} as descriptor {}",
+                             raw_index, offset_index);
+                }
+                index = offset_index;
+                descriptor = alternate;
+                is_new = alternate_is_new;
+            }
+        }
+    }
     if (is_new) {
         if (IsValidEntry(*gpu_memory, descriptor)) {
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);
