@@ -353,6 +353,7 @@ void TextureCache<P>::TickFrame() {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
                 if (budget > 2_GiB) {
                     const u64 old_critical = critical_memory;
+                    const u64 old_expected = expected_memory;
                     const u64 margin = (std::min)(budget / 8, 1_GiB);
                     if constexpr (requires { runtime.GetDeviceMemorySlack(); }) {
                         // The usage counted here leaves out the unused part of the allocator's
@@ -369,14 +370,23 @@ void TextureCache<P>::TickFrame() {
                     critical_memory =
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
-                    // Log the first values and real changes (the budget moves by a few MiB all
-                    // the time).
-                    const u64 change = critical_memory > old_critical
-                                           ? critical_memory - old_critical
-                                           : old_critical - critical_memory;
-                    const bool log = budget_check_frames == 1 || change >= 256_MiB;
-                    ApplyThresholdOverrides(log);
+                    // Compare the *effective* thresholds AFTER the adaptive cap and user
+                    // overrides. Before this change, an uncapped 14+ GiB proposal compared
+                    // against the actual 11 GiB cap looked like a 256+ MiB change every
+                    // 30 frames, flooding logs although the threshold did not move.
+                    ApplyThresholdOverrides(false);
+                    const u64 critical_change = critical_memory > old_critical
+                                                    ? critical_memory - old_critical
+                                                    : old_critical - critical_memory;
+                    const u64 expected_change = expected_memory > old_expected
+                                                    ? expected_memory - old_expected
+                                                    : old_expected - expected_memory;
+                    const bool log = budget_check_frames == 1 ||
+                                     critical_change >= 256_MiB ||
+                                     expected_change >= 256_MiB;
                     if (log) {
+                        // Idempotent: only emit the effective capped values when changed.
+                        ApplyThresholdOverrides(true);
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, block slack {} MiB",
                                  margin >> 20, pressure_margin >> 20, slack_margin >> 20);
