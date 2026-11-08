@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/textures/texture.h"
+#include "video_core/texture_cache/format_lookup_table.h"
 
 TEST_CASE("Legacy texture indices never decode as native header offsets",
           "[video_core][texture_header_index]") {
@@ -33,5 +34,19 @@ TEST_CASE("Resolved texture indices stay unchanged for both memory layouts",
         REQUIRE(TextureHeaderIndex(64, 64, native_tiling) == 64);
         REQUIRE(TextureHeaderIndex(maximum, maximum, native_tiling) == maximum);
         REQUIRE(TextureHeaderIndex(maximum, 63, native_tiling) == maximum);
+    }
+}
+
+TEST_CASE("Uninitialized native TIC formats fall back to a deterministic shader format",
+          "[video_core][texture_header_index]") {
+    using Tegra::Texture::ComponentType;
+    using Tegra::Texture::TextureFormat;
+    using VideoCore::Surface::PixelFormat;
+    for (const bool srgb : {false, true}) {
+        for (const auto component : {ComponentType::UNORM, ComponentType::FLOAT}) {
+            REQUIRE(VideoCommon::PixelFormatFromTextureInfo(
+                        TextureFormat{}, component, component, component, component, srgb) ==
+                    PixelFormat::A8B8G8R8_UNORM);
+        }
     }
 }
