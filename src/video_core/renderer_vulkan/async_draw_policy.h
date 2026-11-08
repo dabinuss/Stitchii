@@ -14,13 +14,13 @@ namespace Vulkan {
 /// @param depth_enabled  The depth test is on for the draw.
 /// @param index_count    Index count of the draw.
 /// @param vertex_count   Vertex count of the draw.
-/// @param discard_native Let native draws follow the heuristic too (on unless EDEN_NX2_ASYNC_DISCARD=0).
+/// @param discard_native Opt native draws into the skip heuristic (EDEN_NX2_ASYNC_DISCARD=1).
+///                        Default is false to preserve render passes and persistent GPU writes.
 /// @return True when the draw may be skipped.
 constexpr bool CanDiscardPendingDraw(bool native, bool depth_enabled, u32 index_count,
                                     u32 vertex_count, bool discard_native = false) {
-    // Native draws can produce persistent resources, even with depth enabled. They are skipped
-    // unless EDEN_NX2_ASYNC_DISCARD=0, trading a possible missing effect for no stall while a
-    // new pipeline builds.
+    // Native draws can produce persistent resources, even with depth enabled. Preserve them
+    // unless explicitly opted into the faster but visually unsafe skip policy.
     if (native && !discard_native) {
         return false;
     }
