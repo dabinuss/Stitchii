@@ -403,7 +403,14 @@ size_t GetTotalPipelineWorkers() {
     }
     return std::min(max_core_threads, desired);
 #else
-    return max_core_threads;
+    // Keep shader workers from saturating all logical CPUs while the guest CPU/GPU threads
+    // are running. On a 24-thread host the previous default used 23 workers and competed
+    // with frame execution. Allow explicit A/B tuning without rebuilding.
+    if (const char* value = std::getenv("EDEN_NX2_PIPELINE_WORKERS"); value && value[0]) {
+        const size_t requested = static_cast<size_t>(std::strtoull(value, nullptr, 10));
+        return std::clamp<size_t>(requested, 1, max_core_threads);
+    }
+    return std::clamp<size_t>(max_core_threads / 3, 1, (std::min)(max_core_threads, size_t{8}));
 #endif
 }
 
@@ -1622,13 +1629,13 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    // Native draws whose pipeline is still building are skipped instead of waited for (the
-    // object is missing for a frame or more rather than the game freezing while the driver
-    // compiles). Full-screen passes (no depth, few vertices) still wait, so a lighting or post
-    // pass is never dropped. EDEN_NX2_ASYNC_DISCARD=0 waits for every pipeline.
+    // Dropping native draws while pipelines compile can discard color/depth passes or writes
+    // to resources consumed by later frames, producing black flashes and missing geometry.
+    // Preserve native draws by default; EDEN_NX2_ASYNC_DISCARD=1 restores the old faster but
+    // potentially visually incorrect policy for A/B tests.
     static const bool discard_native = [] {
         const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
-        const bool enabled = value == nullptr || value[0] != '0';
+        const bool enabled = value != nullptr && value[0] != '0';
         LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws {} unbuilt pipelines",
                  enabled ? "skip" : "wait for");
         return enabled;
@@ -1901,7 +1908,7 @@ void ReportRuntimePipeline(const char* kind, std::chrono::steady_clock::time_poi
     // Slow builds are always logged with their shaders, to find the programs that are slow to
     // translate.
     if (elapsed > std::chrono::milliseconds{100} ||
-        (elapsed > std::chrono::milliseconds{2} && logged < 400)) {
+        (elapsed > std::chrono::milliseconds{16} && logged < 40)) {
         ++logged;
         // Formatting shader identifiers on every runtime pipeline build is wasted work:
         // only construct the description for a pipeline we actually log.
