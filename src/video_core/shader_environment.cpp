@@ -269,7 +269,7 @@ size_t GenericEnvironment::ReadSizeBytes() const noexcept {
 bool GenericEnvironment::CanBeSerialized() const noexcept {
     // A trap guard is checked against live constants on every dispatch (ComputeShader), so a
     // cached pipeline is only used once its guard passes (zortos293/Lichii#192, SinCuri0).
-    return !has_unbound_instructions;
+    return !has_unbound_instructions && !has_invalid_texture_descriptor;
 }
 
 bool GenericEnvironment::HasNativeInstructions() const {
@@ -443,6 +443,7 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                     program_base, static_cast<u32>(stage), raw, index, resolved_index, tic_limit,
                     tic_addr, entry.has_value(), native);
     }
+    has_invalid_texture_descriptor = true;
     Tegra::Texture::TICEntry fallback{};
     fallback.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
     fallback.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
