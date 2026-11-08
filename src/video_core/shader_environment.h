@@ -143,6 +143,9 @@ protected:
     u32 viewport_transform_state = 1;
 
     bool has_unbound_instructions = false;
+    // A shader translated with an unresolved texture descriptor must not be persisted:
+    // a later valid descriptor could otherwise reuse stale shader pixel-format metadata.
+    bool has_invalid_texture_descriptor = false;
     bool has_hle_engine_state = false;
 };
 
