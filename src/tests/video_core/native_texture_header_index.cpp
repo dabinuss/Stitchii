@@ -50,3 +50,16 @@ TEST_CASE("Uninitialized native TIC formats fall back to a deterministic shader 
         }
     }
 }
+
+TEST_CASE("Native byte-offset TIC fallback never overrides valid direct indices",
+          "[video_core][texture_header_index]") {
+    using Tegra::Texture::AlternateTextureHeaderIndex;
+    // If an in-range direct index 32 was invalid, try offset index 1.
+    REQUIRE(AlternateTextureHeaderIndex(32, 32, 63, true) == 1);
+    // Never infer a byte offset for legacy textures or non-aligned native handles.
+    REQUIRE(AlternateTextureHeaderIndex(32, 32, 63, false) == 32);
+    REQUIRE(AlternateTextureHeaderIndex(33, 33, 63, true) == 33);
+    REQUIRE(AlternateTextureHeaderIndex(2048, 2048, 63, true) == 2048);
+    // The usual out-of-range native handle has already been decoded; keep that index.
+    REQUIRE(AlternateTextureHeaderIndex(64, 2, 63, true) == 2);
+}
