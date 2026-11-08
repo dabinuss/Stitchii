@@ -394,6 +394,20 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     const bool native = gpu_memory->UsesNativeTiling();
     const u32 index = Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit, native);
 
+    // Preserve the legacy Switch 1 descriptor path: its memory reads must not acquire the
+    // native-only mapping probes and byte-offset heuristics. Also avoid doing those probes
+    // on every ordinary legacy shader lookup.
+    if (!native && index <= tic_limit) {
+        Tegra::Texture::TICEntry legacy_entry{};
+        const GPUVAddr address =
+            tic_addr + static_cast<GPUVAddr>(index) * sizeof(legacy_entry);
+        gpu_memory->ReadBlock(address, &legacy_entry, sizeof(legacy_entry));
+        if (legacy_entry.format.Value() == Tegra::Texture::TextureFormat{}) {
+            has_invalid_texture_descriptor = true;
+        }
+        return legacy_entry;
+    }
+
     // Native bindless handles can contain a TIC byte offset rather than a descriptor index.
     // The offset may itself be <= tic_limit: only switch interpretations if the direct
     // descriptor is missing/invalid and the alternate descriptor is mapped and has a format.
