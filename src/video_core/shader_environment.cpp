@@ -444,14 +444,14 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                     tic_addr, entry.has_value(), native);
     }
     Tegra::Texture::TICEntry fallback{};
-    fallback.format = Tegra::Texture::TextureFormat::A8B8G8R8;
-    fallback.r_type = Tegra::Texture::ComponentType::UNORM;
-    fallback.g_type = Tegra::Texture::ComponentType::UNORM;
-    fallback.b_type = Tegra::Texture::ComponentType::UNORM;
-    fallback.a_type = Tegra::Texture::ComponentType::UNORM;
-    fallback.texture_type = Tegra::Texture::TextureType::Texture2D;
-    fallback.normalized_coords = 1;
-    fallback.header_version = Tegra::Texture::TICHeaderVersion::BlockLinear;
+    fallback.format.Assign(Tegra::Texture::TextureFormat::A8B8G8R8);
+    fallback.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    fallback.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    fallback.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    fallback.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    fallback.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
+    fallback.normalized_coords.Assign(1);
+    fallback.header_version.Assign(Tegra::Texture::TICHeaderVersion::BlockLinear);
     return fallback;
 }
 
