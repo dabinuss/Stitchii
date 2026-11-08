@@ -18,7 +18,9 @@
 // default; those that change timing or reuse ideas reverted with zortos293/Lichii#161 (its
 // slab of wrong geometry in Kokiri Forest) are off until EDEN_NX2_PERF_ON=<name>,... turns them
 // on: frames_ahead, clean_words, index_rebind, submit_budget, fence_flush, fragment_barrier,
-// front_sleep, async_pipelines, and bounds (this tree keeps its own range cache).
+// front_sleep, and bounds (this tree keeps its own range cache).
+// Native async_pipelines now defaults on: its SPIR-V emission runs on bounded Vulkan workers.
+// Use EDEN_NX2_PERF_OFF=async_pipelines to compare with the old synchronous path.
 // EDEN_NX2_PERF_OPT=0 turns every one off for the A/B; EDEN_NX2_PERF_OFF=<name>,... turns off
 // only those named (Opt below). EDEN_NX2_PERF_VERIFY=1 computes each optimized answer the old
 // way too, logs any difference and uses the old answer.
@@ -89,8 +91,7 @@ inline bool On(Opt opt) {
         const unsigned default_off = bit(Opt::CleanWords) |
                                      bit(Opt::IndexRebind) | bit(Opt::SubmitBudget) |
                                      bit(Opt::FenceFlush) | bit(Opt::FragmentBarrier) |
-                                     bit(Opt::FrontSleep) | bit(Opt::AsyncPipelines) |
-                                     bit(Opt::Bounds);
+                                     bit(Opt::FrontSleep) | bit(Opt::Bounds);
         unsigned mask = (default_off & ~names("EDEN_NX2_PERF_ON")) | names("EDEN_NX2_PERF_OFF");
         mask |= bit(Opt::SplitOverlap);
         if (const char* value = std::getenv("EDEN_NX2_PERF_FRAMES_AHEAD"); value && value[0] == '0') {
