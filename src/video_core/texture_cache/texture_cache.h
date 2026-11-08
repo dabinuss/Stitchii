@@ -903,10 +903,11 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
     // Match shader-side TIC decoding: a native bindless handle can be a byte offset even
     // when its numeric value still lies inside the header pool. Only substitute the alternate
     // descriptor if the direct descriptor is invalid; never override a valid native index.
-    if (native && raw_index % sizeof(TICEntry) == 0 &&
-        (descriptor.format.Value() == Tegra::Texture::TextureFormat{} ||
-         !IsValidEntry(*gpu_memory, descriptor))) {
-        const u32 offset_index = raw_index / sizeof(TICEntry);
+    if (native && (descriptor.format.Value() == Tegra::Texture::TextureFormat{} ||
+                   !IsValidEntry(*gpu_memory, descriptor))) {
+        const u32 offset_index =
+            Tegra::Texture::AlternateTextureHeaderIndex(raw_index, index,
+                                                         table.current_limit, native);
         if (offset_index != index && offset_index <= table.current_limit) {
             auto [alternate, alternate_is_new] = table.Read(*gpu_memory, offset_index);
             if (alternate.format.Value() != Tegra::Texture::TextureFormat{} &&
