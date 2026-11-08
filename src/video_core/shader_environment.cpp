@@ -391,39 +391,68 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
-    const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
-                                                       gpu_memory->UsesNativeTiling())};
-    if (index > tic_limit && std::getenv("EDEN_NX2_RENDER_TRACE")) {
-        static std::atomic<u32> invalid_indices{};
-        if (invalid_indices.fetch_add(1, std::memory_order_relaxed) < 64) {
-            LOG_WARNING(HW_GPU,
-                        "Invalid shader TIC index: program={:#x} stage={} handle={:#x} "
-                        "index={} limit={} base={:#x} native_tiling={}",
-                        program_base, static_cast<u32>(stage), raw, index, tic_limit,
-                        tic_addr, gpu_memory->UsesNativeTiling());
+    const bool native = gpu_memory->UsesNativeTiling();
+    const u32 index = Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit, native);
+
+    // Native bindless handles can contain a TIC byte offset rather than a descriptor index.
+    // The offset may itself be <= tic_limit: only switch interpretations if the direct
+    // descriptor is missing/invalid and the alternate descriptor is mapped and has a format.
+    // Never read an unmapped descriptor or one beyond the advertised TIC pool.
+    const auto read_descriptor = [&](u32 candidate) -> std::optional<Tegra::Texture::TICEntry> {
+        if (candidate > tic_limit) {
+            return std::nullopt;
+        }
+        const GPUVAddr address = tic_addr + static_cast<GPUVAddr>(candidate) *
+                                               sizeof(Tegra::Texture::TICEntry);
+        if (address < tic_addr ||
+            !gpu_memory->IsFullyMappedRange(address, sizeof(Tegra::Texture::TICEntry))) {
+            return std::nullopt;
+        }
+        Tegra::Texture::TICEntry entry{};
+        gpu_memory->ReadBlock(address, &entry, sizeof(entry));
+        return entry;
+    };
+
+    auto entry = read_descriptor(index);
+    u32 resolved_index = index;
+    if (native && (!entry || entry->format.Value() == Tegra::Texture::TextureFormat{}) &&
+        handle.first % sizeof(Tegra::Texture::TICEntry) == 0) {
+        const u32 offset_index = handle.first / sizeof(Tegra::Texture::TICEntry);
+        if (offset_index != index) {
+            auto alternate = read_descriptor(offset_index);
+            if (alternate && alternate->format.Value() != Tegra::Texture::TextureFormat{}) {
+                entry = std::move(alternate);
+                resolved_index = offset_index;
+            }
         }
     }
-    ASSERT(index <= tic_limit);
-    const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
-    Tegra::Texture::TICEntry entry;
-    gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
-    if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
-        std::getenv("EDEN_NX2_RENDER_TRACE")) {
-        static std::atomic<u32> traces{};
-        if (traces.fetch_add(1, std::memory_order_relaxed) < 64) {
-            LOG_WARNING(HW_GPU,
-                        "Zero-format shader TIC: program={:#x} stage={} handle={:#x} "
-                        "index={} limit={} descriptor={:#x} mapped={} image={:#x} "
-                        "size={}x{}x{} header={} type={} raw={:016x}/{:016x}/{:016x}/{:016x}",
-                        program_base, static_cast<u32>(stage), raw, index, tic_limit,
-                        descriptor_addr, gpu_memory->IsFullyMappedRange(descriptor_addr, sizeof(entry)),
-                        entry.Address(), entry.Width(), entry.Height(), entry.Depth(),
-                        static_cast<u32>(entry.header_version.Value()),
-                        static_cast<u32>(entry.texture_type.Value()),
-                        entry.raw[0], entry.raw[1], entry.raw[2], entry.raw[3]);
-        }
+
+    if (entry && entry->format.Value() != Tegra::Texture::TextureFormat{}) {
+        return *entry;
     }
-    return entry;
+
+    // A zero-format TIC is not a valid texture. Using its zeros in shader translation
+    // produces repeated critical assertions and spurious pixel formats. Preserve a valid,
+    // deterministic shader-side description and keep a bounded diagnostic for the source bug.
+    static std::atomic<u32> bad_descriptors{};
+    const u32 count = bad_descriptors.fetch_add(1, std::memory_order_relaxed);
+    if (count < 64) {
+        LOG_WARNING(HW_GPU,
+                    "Invalid shader TIC: program={:#x} stage={} handle={:#x} index={} "
+                    "resolved={} limit={} pool={:#x} mapped={} native={}",
+                    program_base, static_cast<u32>(stage), raw, index, resolved_index, tic_limit,
+                    tic_addr, entry.has_value(), native);
+    }
+    Tegra::Texture::TICEntry fallback{};
+    fallback.format = Tegra::Texture::TextureFormat::A8B8G8R8;
+    fallback.r_type = Tegra::Texture::ComponentType::UNORM;
+    fallback.g_type = Tegra::Texture::ComponentType::UNORM;
+    fallback.b_type = Tegra::Texture::ComponentType::UNORM;
+    fallback.a_type = Tegra::Texture::ComponentType::UNORM;
+    fallback.texture_type = Tegra::Texture::TextureType::Texture2D;
+    fallback.normalized_coords = 1;
+    fallback.header_version = Tegra::Texture::TICHeaderVersion::BlockLinear;
+    return fallback;
 }
 
 namespace {
